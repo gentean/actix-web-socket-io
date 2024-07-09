@@ -1,0 +1,17 @@
+[package]
+name = "actix-web-socket-io"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-web = "4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+actix-rt = "2.9.0"
+tokio =  { version = "1.36.0", features = ["fs", "rt-multi-thread", "macros"] }
+actix = "0.13.3"
+actix-web-actors = "4.3.0"
+uuid = { version = "1.7.0", features = ["v4", "fast-rng", "macro-diagnostics"]}
+log = "0.4"
+
+[dev-dependencies]
