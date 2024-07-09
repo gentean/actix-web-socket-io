@@ -84,7 +84,7 @@ where
 {
     handle_auth: T,
     session_id: Uuid,
-    // 服务端监听的事务总线
+    // 服务端监听的事件总线
     listeners: RwLock<Vec<(Listener, Arc<Box<dyn MessageHandle>>)>>,
     socket_server: Arc<SocketServer>,
 }

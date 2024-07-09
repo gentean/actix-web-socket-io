@@ -9,9 +9,7 @@ use uuid::Uuid;
 
 use crate::socketio::{EngineIOPacketType, MessageType, OpenPacket, SocketIOPacketType, EventData};
 
-
-/// =============================================
-/// 会话
+/// 会话，每创建一个连接，生成一个会话
 pub struct Session {
     pub id: Uuid,
     session_store: Arc<RwLock<SessionStore>>,
@@ -237,6 +235,7 @@ pub struct ConnectPacket {
     data: Header,
 }
 
+/// 鉴权响应数据
 #[derive(Message, Serialize)]
 #[rtype(result = "()")]
 pub struct AuthSuccess<T: Serialize> {
@@ -251,6 +250,7 @@ pub struct Emiter<T: Serialize> {
     pub data: T,
 }
 
+/// 存储所有客户端会话的 store
 pub struct SessionStore {
     // 存储的客户端会话
     pub sessions: HashMap<Uuid, Addr<Session>>,

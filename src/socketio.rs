@@ -2,6 +2,7 @@ use actix::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// 协议文档 https://github.com/socketio/socket.io-protocol/tree/main?tab=readme-ov-file#exchange-protocol
 pub enum SocketIOPacketType {
     // 用于连接
     Connect,
@@ -45,6 +46,8 @@ impl SocketIOPacketType {
     }
 }
 
+
+/// 协议文档 https://github.com/socketio/engine.io-protocol/tree/main?tab=readme-ov-file#protocol
 pub enum EngineIOPacketType {
     // 握手
     Open,
@@ -87,6 +90,8 @@ impl EngineIOPacketType {
     }
 }
 
+
+/// 握手数据 https://github.com/socketio/engine.io-protocol/tree/main?tab=readme-ov-file#handshake
 #[derive(Message, Serialize)]
 #[rtype(result = "()")]
 #[serde(rename_all = "camelCase")]
@@ -107,6 +112,8 @@ pub struct OpenPacket {
 pub struct EventData(pub String, pub Value);
 
 pub enum MessageType<'a> {
+    // 鉴权
     Auth(&'a str),
+    // 事件
     Event(EventData),
 }
