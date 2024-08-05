@@ -103,12 +103,12 @@ impl<T: HandleAuth> SessionReceive<T> {
     fn handle_receive_msg(&self, message_type: MessageType) {
         match message_type {
             MessageType::Auth(data_str) => self.handle_auth_msg(data_str),
-            MessageType::Event(message_data) => self.handler_triger_on(message_data),
+            MessageType::Event(message_data) => self.handler_trigger_on(message_data),
         }
     }
 
     /// 触发事件
-    fn handler_triger_on(&self, event: EventData) {
+    fn handler_trigger_on(&self, event: EventData) {
         for (listener, handler) in self.listeners.read().unwrap().iter() {
             // 按事件名匹配
             if listener.event_name.eq(&event.0) {
@@ -129,11 +129,11 @@ impl<T: HandleAuth> SessionReceive<T> {
                 addr.do_send(AuthSuccess { data: result });
             }
         }
-        self.handler_triger_on(EventData("connect".into(), Value::Null))
+        self.handler_trigger_on(EventData("connect".into(), Value::Null))
     }
 
     /// 处理二进制数据
-    pub fn handle_receive_binary_msg(&mut self, data_bin: Bytes) {
+    pub fn handle_receive_binary_msg(&mut self, _data_bin: Bytes) {
         // 触发监听
     }
 
@@ -154,15 +154,21 @@ impl SocketServer {
     }
 
     /// 发送事件给客户端
-    pub fn emit<D: Serialize + Send + 'static>(&self, emiter: Emiter<D>, session_id: Option<Uuid>) {
+    pub fn emit<D: Serialize + Send + 'static>(
+        &self,
+        emiter: Emiter<D>,
+        session_id: Option<Uuid>,
+    ) -> Result<(), String> {
         if let Some(session_id) = session_id {
             self.session_store
                 .read()
-                .unwrap()
+                .map_err(|err| err.to_string())?
                 .sessions
                 .get(&session_id)
-                .unwrap()
+                .ok_or("session not found")?
                 .do_send(emiter);
         }
+
+        Ok(())
     }
 }

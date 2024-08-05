@@ -3,11 +3,13 @@ use actix::prelude::*;
 use actix_web_actors::ws::{self, Message};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap, sync::{Arc, RwLock}, time::Duration
+    collections::HashMap,
+    sync::{Arc, RwLock},
+    time::Duration,
 };
 use uuid::Uuid;
 
-use crate::socketio::{EngineIOPacketType, MessageType, OpenPacket, SocketIOPacketType, EventData};
+use crate::socketio::{EngineIOPacketType, EventData, MessageType, OpenPacket, SocketIOPacketType};
 
 /// 会话，每创建一个连接，生成一个会话
 pub struct Session {
@@ -77,7 +79,14 @@ impl Actor for Session {
     }
 
     /// 会话将要断开时
-    fn stopping(&mut self, ctx: &mut Self::Context) -> Running {
+    fn stopping(&mut self, _ctx: &mut Self::Context) -> Running {
+        if let Some(handler) = self.message_handler.as_mut() {
+            handler(MessageType::Event(EventData(
+                "disconnect".to_string(),
+                serde_json::Value::Null,
+            )));
+        }
+
         self.session_store
             .write()
             .unwrap()
@@ -212,7 +221,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Session {
                 }
             }
             // 收到二进制消息
-            Message::Binary(bytes) => {
+            Message::Binary(_bytes) => {
                 // data_binary = bytes;
             }
             _ => {}
