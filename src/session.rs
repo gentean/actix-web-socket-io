@@ -96,10 +96,10 @@ impl Actor for Session {
     }
 }
 
-impl<T: Serialize> Handler<Emiter<T>> for Session {
+impl<T: Serialize> Handler<Arc<Emiter<T>>> for Session {
     type Result = ();
 
-    fn handle(&mut self, msg: Emiter<T>, ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: Arc<Emiter<T>>, ctx: &mut Self::Context) -> Self::Result {
         ctx.text(format!(
             "{}{}[\"{}\",{}]",
             EngineIOPacketType::Message.to_value(),

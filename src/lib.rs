@@ -154,11 +154,12 @@ impl SocketServer {
     }
 
     /// 发送事件给客户端
-    pub fn emit<D: Serialize + Send + 'static>(
+    pub fn emit<D: Serialize + Send + 'static + Sync>(
         &self,
         emiter: Emiter<D>,
         session_id: Option<Uuid>,
     ) -> Result<(), String> {
+        let emiter = Arc::new(emiter);
         if let Some(session_id) = session_id {
             self.session_store
                 .read()
@@ -166,7 +167,17 @@ impl SocketServer {
                 .sessions
                 .get(&session_id)
                 .ok_or("session not found")?
-                .do_send(emiter);
+                .do_send(emiter.clone());
+        } else {
+            for session in self
+                .session_store
+                .read()
+                .map_err(|err| err.to_string())?
+                .sessions
+                .values()
+            {
+                session.do_send(emiter.clone());
+            }
         }
 
         Ok(())
