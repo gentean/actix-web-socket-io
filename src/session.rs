@@ -54,7 +54,7 @@ impl Actor for Session {
             upgrades: vec![],
             ping_interval,
             ping_timeout,
-            max_payload: 1000000,
+            max_payload: 50000000,
         });
 
         // 心跳
