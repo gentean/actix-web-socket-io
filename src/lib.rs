@@ -66,6 +66,7 @@ pub trait MessageHandle: Sync + Send + 'static {
 /// 监听客户端
 pub struct Listener {
     pub event_name: String,
+    pub handler: Box<dyn MessageHandle>,
 }
 
 pub struct SocketServer {
@@ -85,7 +86,7 @@ where
     handle_auth: T,
     session_id: Uuid,
     // 服务端监听的事件总线
-    listeners: RwLock<Vec<(Listener, Arc<Box<dyn MessageHandle>>)>>,
+    listeners: RwLock<Vec<Listener>>,
     socket_server: Arc<SocketServer>,
 }
 
@@ -109,10 +110,14 @@ impl<T: HandleAuth> SessionReceive<T> {
 
     /// 触发事件
     fn handler_trigger_on(&self, event: EventData) {
-        for (listener, handler) in self.listeners.read().unwrap().iter() {
+        for listener in self.listeners.read().unwrap().iter() {
             // 按事件名匹配
             if listener.event_name.eq(&event.0) {
-                handler.handler(event.1.clone(), self.session_id, self.socket_server.clone());
+                listener.handler.handler(
+                    event.1.clone(),
+                    self.session_id,
+                    self.socket_server.clone(),
+                );
             }
         }
     }
@@ -138,11 +143,8 @@ impl<T: HandleAuth> SessionReceive<T> {
     }
 
     /// 监听客户端推来的事件
-    pub fn on<U: MessageHandle>(&self, listener: Listener, handler: U) {
-        self.listeners
-            .write()
-            .unwrap()
-            .push((listener, Arc::new(Box::new(handler))));
+    pub fn on<U: MessageHandle>(&self, listener: Listener) {
+        self.listeners.write().unwrap().push(listener);
     }
 }
 
