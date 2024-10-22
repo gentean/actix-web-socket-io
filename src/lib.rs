@@ -143,7 +143,7 @@ impl<T: HandleAuth> SessionReceive<T> {
     }
 
     /// 监听客户端推来的事件
-    pub fn on<U: MessageHandle>(&self, listener: Listener) {
+    pub fn on(&self, listener: Listener) {
         self.listeners.write().unwrap().push(listener);
     }
 }
