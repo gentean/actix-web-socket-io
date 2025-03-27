@@ -3,11 +3,14 @@ use actix_web::{
     HttpRequest, HttpResponse,
 };
 use actix_web_actors::ws::{self};
+use async_trait::async_trait;
+use crossbeam::channel::TryRecvError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use session::{AuthSuccess, Emiter, Session, SessionStore};
 use socketio::{EventData, MessageType};
-use std::sync::{Arc, RwLock};
+use std::{sync::Arc, time::Duration};
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 pub mod session;
@@ -37,7 +40,7 @@ impl SocketIO {
         auth_handle: T,
     ) -> SocketIOResult<T> {
         // 创建一个新会话
-        let mut session = Session::new(self.socket_server.clone().session_store.clone());
+        let session = Session::new(self.socket_server.clone().session_store.clone());
 
         let session_receive = Arc::new(SessionReceive::new(
             auth_handle,
@@ -45,10 +48,24 @@ impl SocketIO {
             self.socket_server.clone(),
         ));
 
-        let inner_receive = session_receive.clone();
+        let receiver = session.get_receiver();
+
         // 收到事件统一处理
-        session.register_handler(move |message_data| {
-            inner_receive.handle_receive_msg(message_data);
+        let inner_receive = session_receive.clone();
+        actix_web::rt::spawn(async move {
+            loop {
+                match receiver.try_recv() {
+                    Ok(message_data) => {
+                        inner_receive.handle_receive_msg(message_data).await;
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => {
+                        actix_web::rt::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }
+            }
         });
 
         SocketIOResult {
@@ -59,8 +76,9 @@ impl SocketIO {
     }
 }
 
+#[async_trait]
 pub trait MessageHandle: Sync + Send + 'static {
-    fn handler(&self, data: Value, session_id: Uuid, socket_server: Arc<SocketServer>);
+    async fn handler(&self, data: Value, session_id: Uuid);
 }
 
 /// 监听客户端
@@ -79,6 +97,9 @@ pub trait HandleAuth {
     fn handler(&self, auth_data: Self::AuthReq) -> Option<Self::AuthRes>;
 }
 
+///
+/// 数据接收对象
+///
 pub struct SessionReceive<T>
 where
     T: HandleAuth,
@@ -101,40 +122,42 @@ impl<T: HandleAuth> SessionReceive<T> {
     }
 
     /// 接收到客户端发来的事件
-    fn handle_receive_msg(&self, message_type: MessageType) {
+    async fn handle_receive_msg(&self, message_type: MessageType) {
         match message_type {
-            MessageType::Auth(data_str) => self.handle_auth_msg(data_str),
-            MessageType::Event(message_data) => self.handler_trigger_on(message_data),
+            MessageType::Auth(data_str) => self.handle_auth_msg(data_str).await,
+            MessageType::Event(message_data) => self.handler_trigger_on(message_data).await,
+            MessageType::None => (),
         }
     }
 
     /// 触发事件
-    fn handler_trigger_on(&self, event: EventData) {
-        for listener in self.listeners.read().unwrap().iter() {
+    async fn handler_trigger_on(&self, event: EventData) {
+        let listeners = self.listeners.read().await;
+        for listener in listeners.iter() {
             // 按事件名匹配
             if listener.event_name.eq(&event.0) {
-                listener.handler.handler(
-                    event.1.clone(),
-                    self.session_id,
-                    self.socket_server.clone(),
-                );
+                listener
+                    .handler
+                    .handler(event.1.clone(), self.session_id)
+                    .await;
             }
         }
     }
 
     /// 处理授权
-    fn handle_auth_msg(&self, data_str: &str) {
+    async fn handle_auth_msg(&self, data_str: String) {
         if let Some(result) = self
             .handle_auth
-            .handler(serde_json::from_str::<T::AuthReq>(data_str).unwrap())
+            .handler(serde_json::from_str::<T::AuthReq>(&data_str).unwrap())
         {
-            let session_store = self.socket_server.session_store.write().unwrap();
+            let session_store = self.socket_server.session_store.write().await;
             let addr = session_store.sessions.get(&self.session_id);
             if let Some(addr) = addr {
                 addr.do_send(AuthSuccess { data: result });
             }
         }
         self.handler_trigger_on(EventData("connect".into(), Value::Null))
+            .await;
     }
 
     /// 处理二进制数据
@@ -143,8 +166,8 @@ impl<T: HandleAuth> SessionReceive<T> {
     }
 
     /// 监听客户端推来的事件
-    pub fn on(&self, listener: Listener) {
-        self.listeners.write().unwrap().push(listener);
+    pub async fn on(&self, listener: Listener) {
+        self.listeners.write().await.push(listener);
     }
 }
 
@@ -156,28 +179,18 @@ impl SocketServer {
     }
 
     /// 发送事件给客户端
-    pub fn emit<D: Serialize + Send + 'static + Sync>(
+    pub async fn emit<D: Serialize + Send + 'static + Sync>(
         &self,
         emiter: Emiter<D>,
         session_id: Option<Uuid>,
     ) -> Result<(), String> {
         let emiter = Arc::new(emiter);
         if let Some(session_id) = session_id {
-            self.session_store
-                .read()
-                .map_err(|err| err.to_string())?
-                .sessions
-                .get(&session_id)
-                .ok_or("session not found")?
-                .do_send(emiter.clone());
+            if let Some(session) = self.session_store.read().await.sessions.get(&session_id) {
+                session.do_send(emiter.clone());
+            }
         } else {
-            for session in self
-                .session_store
-                .read()
-                .map_err(|err| err.to_string())?
-                .sessions
-                .values()
-            {
+            for session in self.session_store.read().await.sessions.values() {
                 session.do_send(emiter.clone());
             }
         }

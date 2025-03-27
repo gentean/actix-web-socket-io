@@ -1,12 +1,10 @@
 use actix::prelude::*;
 
 use actix_web_actors::ws::{self, Message};
+use crossbeam::channel::{self, Receiver, Sender};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::socketio::{EngineIOPacketType, EventData, MessageType, OpenPacket, SocketIOPacketType};
@@ -15,23 +13,26 @@ use crate::socketio::{EngineIOPacketType, EventData, MessageType, OpenPacket, So
 pub struct Session {
     pub id: Uuid,
     session_store: Arc<RwLock<SessionStore>>,
-    message_handler: Option<Box<dyn FnMut(MessageType) + 'static>>,
+    sender: Sender<MessageType>,
+    receiver: Receiver<MessageType>,
     pub heartbeat: bool,
 }
 
 impl Session {
     pub fn new(session_store: Arc<RwLock<SessionStore>>) -> Self {
+        let (sender, receiver) = channel::unbounded::<MessageType>();
         Self {
             id: Uuid::new_v4(),
             session_store,
-            message_handler: None,
+            sender,
+            receiver,
             heartbeat: true,
         }
     }
 
     /// 注册消息处理逻辑
-    pub fn register_handler(&mut self, handler: impl FnMut(MessageType) + 'static) {
-        self.message_handler = Some(Box::new(handler));
+    pub fn get_receiver(&self) -> Receiver<MessageType> {
+        self.receiver.clone()
     }
 }
 
@@ -40,11 +41,14 @@ impl Actor for Session {
 
     /// 会话创建后
     fn started(&mut self, ctx: &mut Self::Context) {
-        self.session_store
-            .write()
-            .unwrap()
-            .sessions
-            .insert(self.id, ctx.address());
+        actix_web::rt::spawn({
+            let session_store = self.session_store.clone();
+            let id = self.id;
+            let address = ctx.address();
+            async move {
+                session_store.write().await.sessions.insert(id, address);
+            }
+        });
 
         // 回应 engine.io
         let ping_interval = 25000;
@@ -80,18 +84,18 @@ impl Actor for Session {
 
     /// 会话将要断开时
     fn stopping(&mut self, _ctx: &mut Self::Context) -> Running {
-        if let Some(handler) = self.message_handler.as_mut() {
-            handler(MessageType::Event(EventData(
-                "disconnect".to_string(),
-                serde_json::Value::Null,
-            )));
-        }
-
-        self.session_store
-            .write()
-            .unwrap()
-            .sessions
-            .remove(&self.id);
+        let _ = self.sender.send(MessageType::Event(EventData(
+            "disconnect".to_string(),
+            serde_json::Value::Null,
+        )));
+        
+        actix_web::rt::spawn({
+            let session_store = self.session_store.clone();
+            let id = self.id;
+            async move {
+                session_store.write().await.sessions.remove(&id);
+            }
+        });
         Running::Stop
     }
 }
@@ -182,9 +186,9 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Session {
 
                 if let Some(eg_type) = eg_type {
                     match eg_type {
-                        EngineIOPacketType::Open => todo!(),
-                        EngineIOPacketType::Close => todo!(),
-                        EngineIOPacketType::Ping => todo!(),
+                        EngineIOPacketType::Open => (),
+                        EngineIOPacketType::Close => (),
+                        EngineIOPacketType::Ping => (),
                         EngineIOPacketType::Pong => {
                             // 客户端心跳上报
                             self.heartbeat = true;
@@ -192,31 +196,32 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Session {
                         EngineIOPacketType::Message => {
                             if let Some(sc_type) = sc_type {
                                 if let Some(data_str) = data_str {
-                                    if let Some(handler) = self.message_handler.as_mut() {
-                                        match sc_type {
-                                            SocketIOPacketType::Connect => {
-                                                // 鉴权
-                                                handler(MessageType::Auth(data_str));
-                                            }
-                                            SocketIOPacketType::Disconnect => todo!(),
-                                            SocketIOPacketType::Event => {
-                                                // 提取事件名，事件参数
-                                                let event =
-                                                    serde_json::from_str::<EventData>(data_str)
-                                                        .unwrap();
-                                                handler(MessageType::Event(event));
-                                            }
-                                            SocketIOPacketType::Ack => todo!(),
-                                            SocketIOPacketType::ConnectError => todo!(),
-                                            SocketIOPacketType::BinaryEvent => todo!(),
-                                            SocketIOPacketType::BinaryAck => todo!(),
+                                    let sended = self.sender.send(match sc_type {
+                                        SocketIOPacketType::Connect => {
+                                            // 鉴权
+                                            MessageType::Auth(data_str.to_owned())
                                         }
+                                        SocketIOPacketType::Disconnect => MessageType::None,
+                                        SocketIOPacketType::Event => {
+                                            // 提取事件名，事件参数
+                                            let event = serde_json::from_str::<EventData>(data_str)
+                                                .unwrap();
+                                            MessageType::Event(event)
+                                        }
+                                        SocketIOPacketType::Ack => MessageType::None,
+                                        SocketIOPacketType::ConnectError => MessageType::None,
+                                        SocketIOPacketType::BinaryEvent => MessageType::None,
+                                        SocketIOPacketType::BinaryAck => MessageType::None,
+                                    });
+
+                                    if sended.is_err() {
+                                        log::error!("socket-io 发送数据失败{sended:?}");
                                     }
                                 }
                             }
                         }
-                        EngineIOPacketType::Upgrade => todo!(),
-                        EngineIOPacketType::Noop => todo!(),
+                        EngineIOPacketType::Upgrade => (),
+                        EngineIOPacketType::Noop => (),
                     }
                 }
             }

@@ -111,9 +111,10 @@ pub struct OpenPacket {
 #[derive(Deserialize, Debug)]
 pub struct EventData(pub String, pub Value);
 
-pub enum MessageType<'a> {
+pub enum MessageType {
+    None,
     // 鉴权
-    Auth(&'a str),
+    Auth(String),
     // 事件
     Event(EventData),
 }
