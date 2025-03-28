@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 use session::{Emiter, Session, SessionStore};
 use socketio::{ConnectSuccess, EventData, MessageType};
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -145,7 +145,7 @@ impl SessionReceive {
         let session_store = self.socket_server.session_store.write().await;
         let addr = session_store.sessions.get(&self.session_id);
         if let Some(addr) = addr {
-            addr.do_send(ConnectSuccess { data: "accept" });
+            addr.do_send(ConnectSuccess { data: HashMap::from([("sid", "accept")]) });
         }
 
         self.handler_trigger_on(EventData("connect".into(), Value::Null))
