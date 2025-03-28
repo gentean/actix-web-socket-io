@@ -2,7 +2,6 @@ use actix_web::{App, HttpServer};
 
 mod websocket;
 mod infra;
-mod validate;
 mod service;
 
 #[actix_web::main]

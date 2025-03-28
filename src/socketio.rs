@@ -1,99 +1,51 @@
 use actix::Message;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// 协议文档 https://github.com/socketio/socket.io-protocol/tree/main?tab=readme-ov-file#exchange-protocol
+#[derive(IntoPrimitive, Clone, Eq, PartialEq, TryFromPrimitive)]
+#[repr(u8)]
 pub enum SocketIOPacketType {
     // 用于连接
-    Connect,
+    Connect = 0,
     // 用于断开连接
-    Disconnect,
+    Disconnect = 1,
     // 用于向对方发送数据
-    Event,
+    Event = 2,
     // 用于数据确认
-    Ack,
+    Ack = 3,
     // 用于连接错误，如鉴权失败
-    ConnectError,
+    ConnectError = 4,
     // 用于二进制数据
-    BinaryEvent,
+    BinaryEvent = 5,
     // 用于二进制数据应答
-    BinaryAck,
+    BinaryAck = 6,
 }
-
-impl SocketIOPacketType {
-    pub fn to_value(&self) -> u8 {
-        match self {
-            SocketIOPacketType::Connect => 0,
-            SocketIOPacketType::Disconnect => 1,
-            SocketIOPacketType::Event => 2,
-            SocketIOPacketType::Ack => 3,
-            SocketIOPacketType::ConnectError => 4,
-            SocketIOPacketType::BinaryEvent => 5,
-            SocketIOPacketType::BinaryAck => 6,
-        }
-    }
-    pub fn from_value(val: u8) -> Option<Self> {
-        match val {
-            0 => Some(Self::Connect),
-            1 => Some(Self::Disconnect),
-            2 => Some(Self::Event),
-            3 => Some(Self::Ack),
-            4 => Some(Self::ConnectError),
-            5 => Some(Self::BinaryEvent),
-            6 => Some(Self::BinaryAck),
-            _ => None,
-        }
-    }
-}
-
 
 /// 协议文档 https://github.com/socketio/engine.io-protocol/tree/main?tab=readme-ov-file#protocol
+#[derive(IntoPrimitive, Clone, Eq, PartialEq, TryFromPrimitive)]
+#[repr(u8)]
 pub enum EngineIOPacketType {
     // 握手
-    Open,
+    Open = 0,
     // 传输可以关闭
-    Close,
+    Close = 1,
     // 心跳
-    Ping,
+    Ping = 2,
     // 心跳
-    Pong,
+    Pong = 3,
     // 发送有效载荷
-    Message,
+    Message = 4,
     // 升级
-    Upgrade,
+    Upgrade = 5,
     // 升级
-    Noop,
+    Noop = 6,
 }
-impl EngineIOPacketType {
-    pub fn to_value(&self) -> u8 {
-        match self {
-            EngineIOPacketType::Open => 0,
-            EngineIOPacketType::Close => 1,
-            EngineIOPacketType::Ping => 2,
-            EngineIOPacketType::Pong => 3,
-            EngineIOPacketType::Message => 4,
-            EngineIOPacketType::Upgrade => 5,
-            EngineIOPacketType::Noop => 6,
-        }
-    }
-    pub fn from_value(val: u8) -> Option<Self> {
-        match val {
-            0 => Some(EngineIOPacketType::Open),
-            1 => Some(EngineIOPacketType::Close),
-            2 => Some(EngineIOPacketType::Ping),
-            3 => Some(EngineIOPacketType::Pong),
-            4 => Some(EngineIOPacketType::Message),
-            5 => Some(EngineIOPacketType::Upgrade),
-            6 => Some(EngineIOPacketType::Noop),
-            _ => None,
-        }
-    }
-}
-
 
 /// 握手数据 https://github.com/socketio/engine.io-protocol/tree/main?tab=readme-ov-file#handshake
 #[derive(Message, Serialize)]
-#[rtype(result = "()")]
+#[rtype(result = "Result<(), &'static str>")]
 #[serde(rename_all = "camelCase")]
 pub struct OpenPacket {
     // 会话 ID
@@ -101,11 +53,11 @@ pub struct OpenPacket {
     // 可以升级的 transport 列表，默认为 [websocket]
     pub upgrades: Vec<String>,
     // 心跳间隔(毫秒), 25000
-    pub ping_interval: u32,
+    pub ping_interval: u64,
     // 心跳超时(毫秒), 20000
-    pub ping_timeout: u32,
+    pub ping_timeout: u64,
     // 每个块的最大字节数, 1000000
-    pub max_payload: u32,
+    pub max_payload: usize,
 }
 
 #[derive(Deserialize, Debug)]
@@ -113,8 +65,6 @@ pub struct EventData(pub String, pub Value);
 
 pub enum MessageType {
     None,
-    // 鉴权
-    Auth(String),
     // 事件
     Event(EventData),
 }

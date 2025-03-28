@@ -5,9 +5,9 @@ use actix_web::{
 use actix_web_actors::ws::{self};
 use async_trait::async_trait;
 use crossbeam::channel::TryRecvError;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
-use session::{AuthSuccess, Emiter, Session, SessionStore};
+use session::{Emiter, Session, SessionStore};
 use socketio::{EventData, MessageType};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
@@ -18,35 +18,56 @@ pub mod socketio;
 
 pub struct SocketIO {
     pub socket_server: Arc<SocketServer>,
+    pub socket_config: Arc<SocketConfig>,
 }
 
-pub struct SocketIOResult<T: HandleAuth> {
+pub struct SocketIOResult {
     pub http_response: Result<HttpResponse, actix_web::error::Error>,
-    pub session_receive: Arc<SessionReceive<T>>,
+    pub session_receive: Arc<SessionReceive>,
     pub session_id: Uuid,
+}
+
+#[derive(Clone)]
+pub struct SocketConfig {
+    // 心跳间隔(毫秒), 默认 25000
+    pub ping_interval: u64,
+    // 心跳超时(毫秒), 默认 20000
+    pub ping_timeout: u64,
+    // 每个块的最大字节数, 默认 1000000 Byte
+    pub max_payload: usize,
+}
+
+impl Default for SocketConfig {
+    fn default() -> Self {
+        Self {
+            ping_interval: 25000,
+            ping_timeout: 20000,
+            max_payload: 1000000,
+        }
+    }
 }
 
 impl SocketIO {
     pub fn new() -> Self {
         Self {
+            socket_config: Arc::new(SocketConfig::default()),
             socket_server: Arc::new(SocketServer::new()),
         }
     }
-    /// 建立连接
-    pub fn connect<T: HandleAuth + 'static>(
-        &self,
-        req: &HttpRequest,
-        stream: Payload,
-        auth_handle: T,
-    ) -> SocketIOResult<T> {
-        // 创建一个新会话
-        let session = Session::new(self.socket_server.clone().session_store.clone());
 
-        let session_receive = Arc::new(SessionReceive::new(
-            auth_handle,
-            session.id,
-            self.socket_server.clone(),
-        ));
+    pub fn config(&mut self, socket_config: SocketConfig) -> &mut Self {
+        self.socket_config = Arc::new(socket_config);
+
+        self
+    }
+
+    /// 建立连接
+    pub fn connect(&self, req: &HttpRequest, stream: Payload) -> SocketIOResult {
+        let session_store = self.socket_server.session_store.clone();
+        // 创建一个新会话
+        let session = Session::new(self.socket_config.clone(), session_store);
+
+        let session_receive = Arc::new(SessionReceive::new(session.id, self.socket_server.clone()));
 
         let receiver = session.get_receiver();
 
@@ -91,30 +112,19 @@ pub struct SocketServer {
     pub session_store: Arc<RwLock<SessionStore>>,
 }
 
-pub trait HandleAuth {
-    type AuthReq: for<'a> Deserialize<'a>;
-    type AuthRes: Send + Serialize + 'static;
-    fn handler(&self, auth_data: Self::AuthReq) -> Option<Self::AuthRes>;
-}
-
 ///
 /// 数据接收对象
 ///
-pub struct SessionReceive<T>
-where
-    T: HandleAuth,
-{
-    handle_auth: T,
+pub struct SessionReceive {
     session_id: Uuid,
     // 服务端监听的事件总线
     listeners: RwLock<Vec<Listener>>,
     socket_server: Arc<SocketServer>,
 }
 
-impl<T: HandleAuth> SessionReceive<T> {
-    pub fn new(handle_auth: T, session_id: Uuid, socket_server: Arc<SocketServer>) -> Self {
+impl SessionReceive {
+    pub fn new(session_id: Uuid, socket_server: Arc<SocketServer>) -> Self {
         Self {
-            handle_auth,
             session_id,
             listeners: RwLock::new(vec![]),
             socket_server,
@@ -124,7 +134,6 @@ impl<T: HandleAuth> SessionReceive<T> {
     /// 接收到客户端发来的事件
     async fn handle_receive_msg(&self, message_type: MessageType) {
         match message_type {
-            MessageType::Auth(data_str) => self.handle_auth_msg(data_str).await,
             MessageType::Event(message_data) => self.handler_trigger_on(message_data).await,
             MessageType::None => (),
         }
@@ -142,22 +151,6 @@ impl<T: HandleAuth> SessionReceive<T> {
                     .await;
             }
         }
-    }
-
-    /// 处理授权
-    async fn handle_auth_msg(&self, data_str: String) {
-        if let Some(result) = self
-            .handle_auth
-            .handler(serde_json::from_str::<T::AuthReq>(&data_str).unwrap())
-        {
-            let session_store = self.socket_server.session_store.write().await;
-            let addr = session_store.sessions.get(&self.session_id);
-            if let Some(addr) = addr {
-                addr.do_send(AuthSuccess { data: result });
-            }
-        }
-        self.handler_trigger_on(EventData("connect".into(), Value::Null))
-            .await;
     }
 
     /// 处理二进制数据

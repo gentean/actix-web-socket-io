@@ -16,7 +16,6 @@ use uuid::Uuid;
 use crate::{
     infra::socket,
     service::realtime::{watch_change, ValData},
-    validate::SocketAuth,
 };
 
 struct SessionData {
@@ -35,7 +34,7 @@ async fn listen_device(req: HttpRequest, stream: Payload) -> impl Responder {
         http_response,
         session_receive,
         session_id,
-    } = socket::socket_io().connect(&req, stream, SocketAuth);
+    } = socket::socket_io().connect(&req, stream);
 
     session_receive
         .on(Listener {
@@ -80,7 +79,7 @@ async fn listen_device(req: HttpRequest, stream: Payload) -> impl Responder {
                 break;
             }
 
-            // 刷出设备状态
+            // 刷出值
             if let Some(session_data) = data_cache.get(&session_id) {
                 let hash_map = session_data.value_cache.read().await;
                 let result = hash_map.values().cloned().collect::<Vec<_>>();
@@ -89,7 +88,7 @@ async fn listen_device(req: HttpRequest, stream: Payload) -> impl Responder {
                     let result = socket_server
                         .emit(
                             Emiter {
-                                event_name: "/change/device_status".into(),
+                                event_name: "/change/datas".into(),
                                 data: result,
                             },
                             Some(session_id),
@@ -97,7 +96,7 @@ async fn listen_device(req: HttpRequest, stream: Payload) -> impl Responder {
                         .await;
 
                     if let Err(msg) = result {
-                        log::error!("设备状态刷出失败, msg: {}", msg);
+                        log::error!("数据刷出失败, msg: {}", msg);
                     }
                 }
             }
@@ -130,7 +129,7 @@ impl MessageHandle for SocketDisConnected {
 struct SubscribeDataDto {
     ids: Vec<i32>,
 }
-/// 遥测订阅逻辑
+/// 订阅逻辑
 pub struct SubscribeData;
 #[async_trait]
 impl MessageHandle for SubscribeData {
@@ -153,7 +152,7 @@ impl MessageHandle for SubscribeData {
 
             receiver_val(receiver, session_id).await;
         } else {
-            log::info!("没有要监听 id");
+            log::info!("没有要监听的 id");
         }
     }
 }
@@ -182,7 +181,7 @@ async fn receiver_val(receiver: crossbeam::channel::Receiver<Arc<ValData>>, sess
     });
 }
 
-/// 取消某个场景的点号订阅
+/// 取消订阅
 pub struct UnSubscribeData;
 #[async_trait]
 impl MessageHandle for UnSubscribeData {

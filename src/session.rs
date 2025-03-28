@@ -7,7 +7,10 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::socketio::{EngineIOPacketType, EventData, MessageType, OpenPacket, SocketIOPacketType};
+use crate::{
+    socketio::{EngineIOPacketType, EventData, MessageType, OpenPacket, SocketIOPacketType},
+    SocketConfig,
+};
 
 /// 会话，每创建一个连接，生成一个会话
 pub struct Session {
@@ -16,10 +19,11 @@ pub struct Session {
     sender: Sender<MessageType>,
     receiver: Receiver<MessageType>,
     pub heartbeat: bool,
+    socket_config: Arc<SocketConfig>,
 }
 
 impl Session {
-    pub fn new(session_store: Arc<RwLock<SessionStore>>) -> Self {
+    pub fn new(socket_config: Arc<SocketConfig>, session_store: Arc<RwLock<SessionStore>>) -> Self {
         let (sender, receiver) = channel::unbounded::<MessageType>();
         Self {
             id: Uuid::new_v4(),
@@ -27,6 +31,7 @@ impl Session {
             sender,
             receiver,
             heartbeat: true,
+            socket_config,
         }
     }
 
@@ -51,14 +56,14 @@ impl Actor for Session {
         });
 
         // 回应 engine.io
-        let ping_interval = 25000;
-        let ping_timeout = 20000;
+        let ping_interval = self.socket_config.ping_interval;
+        let ping_timeout = self.socket_config.ping_timeout;
         ctx.address().do_send(OpenPacket {
             sid: self.id.to_string(),
             upgrades: vec![],
             ping_interval,
             ping_timeout,
-            max_payload: 50000000,
+            max_payload: self.socket_config.max_payload,
         });
 
         // 心跳
@@ -66,7 +71,7 @@ impl Actor for Session {
             Duration::from_millis(ping_interval.into()),
             move |session, ctx| {
                 // 发送 Ping
-                ctx.text(EngineIOPacketType::Ping.to_value().to_string());
+                ctx.text((EngineIOPacketType::Ping as u8).to_string());
                 session.heartbeat = false;
 
                 ctx.run_later(
@@ -88,7 +93,7 @@ impl Actor for Session {
             "disconnect".to_string(),
             serde_json::Value::Null,
         )));
-        
+
         actix_web::rt::spawn({
             let session_store = self.session_store.clone();
             let id = self.id;
@@ -101,51 +106,64 @@ impl Actor for Session {
 }
 
 impl<T: Serialize> Handler<Arc<Emiter<T>>> for Session {
-    type Result = ();
-
+    type Result = Result<(), &'static str>;
     fn handle(&mut self, msg: Arc<Emiter<T>>, ctx: &mut Self::Context) -> Self::Result {
+        let Ok(json_str) = serde_json::to_string(&msg.data) else {
+            return Err("json 序列化失败");
+        };
         ctx.text(format!(
             "{}{}[\"{}\",{}]",
-            EngineIOPacketType::Message.to_value(),
-            SocketIOPacketType::Event.to_value(),
+            EngineIOPacketType::Message as u8,
+            SocketIOPacketType::Event as u8,
             msg.event_name,
-            serde_json::to_string(&msg.data).unwrap()
-        ))
+            json_str
+        ));
+
+        Ok(())
     }
 }
 
 /// 建立连接回应给客户端处理
 impl Handler<ConnectPacket> for Session {
-    type Result = ();
+    type Result = Result<(), &'static str>;
     fn handle(&mut self, msg: ConnectPacket, ctx: &mut Self::Context) -> Self::Result {
-        ctx.text(format!(
-            "{}{}",
-            msg.r#type.to_value(),
-            serde_json::to_string(&msg.data).unwrap()
-        ))
+        let Ok(json_str) = serde_json::to_string(&msg.data) else {
+            return Err("json 序列化失败");
+        };
+        ctx.text(format!("{}{}", msg.r#type as u8, json_str));
+
+        Ok(())
     }
 }
 
 impl Handler<OpenPacket> for Session {
-    type Result = ();
+    type Result = Result<(), &'static str>;
     fn handle(&mut self, msg: OpenPacket, ctx: &mut Self::Context) -> Self::Result {
-        ctx.text(format!(
-            "{}{}",
-            EngineIOPacketType::Open.to_value(),
-            serde_json::to_string(&msg).unwrap()
-        ))
+        let Ok(json_str) = serde_json::to_string(&msg) else {
+            return Err("json 序列化失败");
+        };
+
+        ctx.text(format!("{}{}", EngineIOPacketType::Open as u8, json_str));
+
+        Ok(())
     }
 }
 
 impl<T: Serialize> Handler<AuthSuccess<T>> for Session {
-    type Result = ();
+    type Result = Result<(), &'static str>;
     fn handle(&mut self, msg: AuthSuccess<T>, ctx: &mut Self::Context) -> Self::Result {
+        let Ok(json_str) = serde_json::to_string(&msg) else {
+            return Err("json 序列化失败");
+        };
+
         ctx.text(format!(
             "{}{}{}",
-            EngineIOPacketType::Message.to_value(),
-            SocketIOPacketType::Connect.to_value(),
-            serde_json::to_string(&msg.data).unwrap()
-        ))
+            EngineIOPacketType::Message as u8,
+            SocketIOPacketType::Connect as u8,
+            json_str
+        ));
+
+        Ok(())
     }
 }
 
@@ -168,21 +186,15 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Session {
                 let mut sc_type = None;
                 let data_str = raw.get(2..);
 
-                if let Some(eg_type_str) = raw.get(0..1) {
-                    if let Ok(eg_type_val) = eg_type_str.parse::<u8>() {
-                        if let Some(type_enum) = EngineIOPacketType::from_value(eg_type_val) {
-                            eg_type = Some(type_enum);
-                        }
-                    }
-                }
+                eg_type = raw
+                    .get(0..1)
+                    .and_then(|f| f.parse::<u8>().ok())
+                    .and_then(|f| EngineIOPacketType::try_from(f).ok());
 
-                if let Some(sc_type_str) = raw.get(1..2) {
-                    if let Ok(sc_type_val) = sc_type_str.parse::<u8>() {
-                        if let Some(type_enum) = SocketIOPacketType::from_value(sc_type_val) {
-                            sc_type = Some(type_enum);
-                        }
-                    }
-                }
+                sc_type = raw
+                    .get(1..2)
+                    .and_then(|f| f.parse::<u8>().ok())
+                    .and_then(|f| SocketIOPacketType::try_from(f).ok());
 
                 if let Some(eg_type) = eg_type {
                     match eg_type {
@@ -197,16 +209,13 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Session {
                             if let Some(sc_type) = sc_type {
                                 if let Some(data_str) = data_str {
                                     let sended = self.sender.send(match sc_type {
-                                        SocketIOPacketType::Connect => {
-                                            // 鉴权
-                                            MessageType::Auth(data_str.to_owned())
-                                        }
+                                        SocketIOPacketType::Connect => MessageType::None,
                                         SocketIOPacketType::Disconnect => MessageType::None,
                                         SocketIOPacketType::Event => {
-                                            // 提取事件名，事件参数
-                                            let event = serde_json::from_str::<EventData>(data_str)
-                                                .unwrap();
-                                            MessageType::Event(event)
+                                            serde_json::from_str::<EventData>(data_str)
+                                                .map_or(MessageType::None, |event| {
+                                                    MessageType::Event(event)
+                                                })
                                         }
                                         SocketIOPacketType::Ack => MessageType::None,
                                         SocketIOPacketType::ConnectError => MessageType::None,
@@ -243,7 +252,7 @@ struct Header {
 
 /// 建立连接结构体
 #[derive(Message)]
-#[rtype(result = "()")]
+#[rtype(result = "Result<(), &'static str>")]
 pub struct ConnectPacket {
     r#type: SocketIOPacketType,
     data: Header,
@@ -251,14 +260,14 @@ pub struct ConnectPacket {
 
 /// 鉴权响应数据
 #[derive(Message, Serialize)]
-#[rtype(result = "()")]
+#[rtype(result = "Result<(), &'static str>")]
 pub struct AuthSuccess<T: Serialize> {
     pub data: T,
 }
 
 /// 发送客户端
 #[derive(Message)]
-#[rtype(result = "()")]
+#[rtype(result = "Result<(), &'static str>")]
 pub struct Emiter<T: Serialize> {
     pub event_name: String,
     pub data: T,

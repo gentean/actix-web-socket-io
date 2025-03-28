@@ -11,7 +11,7 @@ use actix_web_socket_io::{session::Emiter, Listener, MessageHandle, SocketIOResu
 use chrono::Utc;
 use uuid::Uuid;
 
-use crate::{infra::socket, validate::SocketAuth};
+use crate::infra::socket;
 
 #[get("/socket.io")]
 async fn listen_system(req: HttpRequest, stream: Payload) -> impl Responder {
@@ -20,7 +20,7 @@ async fn listen_system(req: HttpRequest, stream: Payload) -> impl Responder {
         http_response,
         session_receive,
         session_id,
-    } = socket::socket_io().connect(&req, stream, SocketAuth);
+    } = socket::socket_io().connect(&req, stream);
 
     // 订阅建立连接
     session_receive
@@ -102,7 +102,7 @@ impl MessageHandle for SocketDisConnected {
     }
 }
 
-/// 注册 API 接口到 /system 路径下      
+/// 注册 API 接口到 /bar 路径下      
 pub fn add_route() -> Scope {
-    web::scope("/system").service(listen_system)
+    web::scope("/bar").service(listen_system)
 }

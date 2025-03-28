@@ -49,7 +49,7 @@ pub async fn watch_change(ids: Vec<i32>) -> (channel::Receiver<Arc<ValData>>, im
 }
 
 /// 触发给订阅了这个 id 的上层
-pub async fn trigger_dit_change(id: i32, val_data: ValData) {
+async fn trigger_dit_change(id: i32, val_data: ValData) {
     let share_val_data = Arc::new(val_data);
     let change_handlers = CHANGE_HANDLERS.read().await;
     if let Some(handlers) = change_handlers.get(&id) {
