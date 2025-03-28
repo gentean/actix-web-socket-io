@@ -8,7 +8,9 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::{
-    socketio::{EngineIOPacketType, EventData, MessageType, OpenPacket, SocketIOPacketType},
+    socketio::{
+        ConnectSuccess, EngineIOPacketType, EventData, MessageType, OpenPacket, SocketIOPacketType,
+    },
     SocketConfig,
 };
 
@@ -102,6 +104,23 @@ impl Actor for Session {
             }
         });
         Running::Stop
+    }
+}
+
+impl<T: Serialize> Handler<ConnectSuccess<T>> for Session {
+    type Result = Result<(), &'static str>;
+    fn handle(&mut self, msg: ConnectSuccess<T>, ctx: &mut Self::Context) -> Self::Result {
+        let Ok(json_str) = serde_json::to_string(&msg.data) else {
+            return Err("json 序列化失败");
+        };
+        ctx.text(format!(
+            "{}{}{}",
+            EngineIOPacketType::Message as u8,
+            SocketIOPacketType::Connect as u8,
+            json_str
+        ));
+
+        Ok(())
     }
 }
 
@@ -209,7 +228,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Session {
                             if let Some(sc_type) = sc_type {
                                 if let Some(data_str) = data_str {
                                     let sended = self.sender.send(match sc_type {
-                                        SocketIOPacketType::Connect => MessageType::None,
+                                        SocketIOPacketType::Connect => MessageType::Connect,
                                         SocketIOPacketType::Disconnect => MessageType::None,
                                         SocketIOPacketType::Event => {
                                             serde_json::from_str::<EventData>(data_str)

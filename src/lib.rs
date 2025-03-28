@@ -8,7 +8,7 @@ use crossbeam::channel::TryRecvError;
 use serde::Serialize;
 use serde_json::Value;
 use session::{Emiter, Session, SessionStore};
-use socketio::{EventData, MessageType};
+use socketio::{ConnectSuccess, EventData, MessageType};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -134,9 +134,22 @@ impl SessionReceive {
     /// 接收到客户端发来的事件
     async fn handle_receive_msg(&self, message_type: MessageType) {
         match message_type {
+            MessageType::Connect => self.accept_connect().await,
             MessageType::Event(message_data) => self.handler_trigger_on(message_data).await,
             MessageType::None => (),
         }
+    }
+
+    /// 同意建立连接
+    async fn accept_connect(&self) {
+        let session_store = self.socket_server.session_store.write().await;
+        let addr = session_store.sessions.get(&self.session_id);
+        if let Some(addr) = addr {
+            addr.do_send(ConnectSuccess { data: "accept" });
+        }
+
+        self.handler_trigger_on(EventData("connect".into(), Value::Null))
+            .await;
     }
 
     /// 触发事件

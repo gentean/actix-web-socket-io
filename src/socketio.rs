@@ -65,6 +65,15 @@ pub struct EventData(pub String, pub Value);
 
 pub enum MessageType {
     None,
+    // 请求连接
+    Connect,
     // 事件
     Event(EventData),
+}
+
+/// 连接成功响应数据
+#[derive(Message, Serialize)]
+#[rtype(result = "Result<(), &'static str>")]
+pub struct ConnectSuccess<T: Serialize> {
+    pub data: T,
 }
