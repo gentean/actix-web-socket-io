@@ -2,6 +2,15 @@
 name = "actix-web-socket-io"
 version = "0.1.1"
 edition = "2021"
+authors = [
+  "Gentean <cf361610910@gmail.com>"
+]
+description = "Pactix-web-socket-io server side"
+keywords = ["socketio", "actix-web", "actix-web-socket-io", "socketio-server"]
+license = "BSD-3-Clause OR MIT OR Apache-2.0"
+repository = "https://github.com/gentean/actix-web-socket-io"
+readme = "README.md"
+categories = ["web-programming::websocket"]
 
 [dependencies]
 actix-web = "4"
