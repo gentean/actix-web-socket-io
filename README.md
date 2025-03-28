@@ -14,7 +14,7 @@ async fn listen_system(req: HttpRequest, stream: Payload) -> impl Responder {
         http_response,
         session_receive,
         session_id,
-    } = socket::socket_io().connect(&req, stream, SocketAuth);
+    } = socket::socket_io().connect(&req, stream);
 
     // 订阅建立连接
     session_receive
