@@ -80,3 +80,8 @@ pub fn add_route() -> Scope {
     web::scope("/system").service(listen_system)
 }
 ```
+
+
+## License
+
+actix-web-socket-io may be used under your choice of the BSD 3-clause, Apache 2, or MIT license.
