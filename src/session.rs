@@ -1,10 +1,12 @@
 use actix::prelude::*;
 
 use actix_web_actors::ws::{self, Message};
-use crossbeam::channel::{self, Receiver, Sender};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::sync::RwLock;
+use tokio::sync::{
+    broadcast::{self, Receiver, Sender},
+    RwLock,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -19,19 +21,17 @@ pub struct Session {
     pub id: Uuid,
     session_store: Arc<RwLock<SessionStore>>,
     sender: Sender<MessageType>,
-    receiver: Receiver<MessageType>,
     pub heartbeat: bool,
     socket_config: Arc<SocketConfig>,
 }
 
 impl Session {
     pub fn new(socket_config: Arc<SocketConfig>, session_store: Arc<RwLock<SessionStore>>) -> Self {
-        let (sender, receiver) = channel::unbounded::<MessageType>();
+        let (sender, _) = broadcast::channel::<MessageType>(1024);
         Self {
             id: Uuid::new_v4(),
             session_store,
             sender,
-            receiver,
             heartbeat: true,
             socket_config,
         }
@@ -39,7 +39,7 @@ impl Session {
 
     /// 注册消息处理逻辑
     pub fn get_receiver(&self) -> Receiver<MessageType> {
-        self.receiver.clone()
+        self.sender.subscribe()
     }
 }
 
@@ -201,16 +201,14 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Session {
             // 收到文本消息
             Message::Text(byte_string) => {
                 let raw = byte_string.to_string();
-                let mut eg_type = None;
-                let mut sc_type = None;
                 let data_str = raw.get(2..);
 
-                eg_type = raw
+                let eg_type = raw
                     .get(0..1)
                     .and_then(|f| f.parse::<u8>().ok())
                     .and_then(|f| EngineIOPacketType::try_from(f).ok());
 
-                sc_type = raw
+                let sc_type = raw
                     .get(1..2)
                     .and_then(|f| f.parse::<u8>().ok())
                     .and_then(|f| SocketIOPacketType::try_from(f).ok());

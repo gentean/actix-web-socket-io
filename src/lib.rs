@@ -4,12 +4,11 @@ use actix_web::{
 };
 use actix_web_actors::ws::{self};
 use async_trait::async_trait;
-use crossbeam::channel::TryRecvError;
 use serde::Serialize;
 use serde_json::Value;
 use session::{Emiter, Session, SessionStore};
 use socketio::{ConnectSuccess, EventData, MessageType};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -69,23 +68,13 @@ impl SocketIO {
 
         let session_receive = Arc::new(SessionReceive::new(session.id, self.socket_server.clone()));
 
-        let receiver = session.get_receiver();
+        let mut receiver = session.get_receiver();
 
         // 收到事件统一处理
         let inner_receive = session_receive.clone();
         actix_web::rt::spawn(async move {
-            loop {
-                match receiver.try_recv() {
-                    Ok(message_data) => {
-                        inner_receive.handle_receive_msg(message_data).await;
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        break;
-                    }
-                    Err(TryRecvError::Empty) => {
-                        actix_web::rt::time::sleep(Duration::from_millis(20)).await;
-                    }
-                }
+            while let Ok(message_data) = receiver.recv().await {
+                inner_receive.handle_receive_msg(message_data).await;
             }
         });
 
@@ -145,7 +134,9 @@ impl SessionReceive {
         let session_store = self.socket_server.session_store.write().await;
         let addr = session_store.sessions.get(&self.session_id);
         if let Some(addr) = addr {
-            addr.do_send(ConnectSuccess { data: HashMap::from([("sid", "accept")]) });
+            addr.do_send(ConnectSuccess {
+                data: HashMap::from([("sid", "accept")]),
+            });
         }
 
         self.handler_trigger_on(EventData("connect".into(), Value::Null))

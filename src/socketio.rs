@@ -60,9 +60,10 @@ pub struct OpenPacket {
     pub max_payload: usize,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct EventData(pub String, pub Value);
 
+#[derive(Debug, Clone)]
 pub enum MessageType {
     None,
     // 请求连接
