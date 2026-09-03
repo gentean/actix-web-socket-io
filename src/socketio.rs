@@ -1,4 +1,3 @@
-use actix::Message;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -44,8 +43,7 @@ pub enum EngineIOPacketType {
 }
 
 /// 握手数据 https://github.com/socketio/engine.io-protocol/tree/main?tab=readme-ov-file#handshake
-#[derive(Message, Serialize)]
-#[rtype(result = "Result<(), &'static str>")]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenPacket {
     // 会话 ID
@@ -73,8 +71,7 @@ pub enum MessageType {
 }
 
 /// 连接成功响应数据
-#[derive(Message, Serialize)]
-#[rtype(result = "Result<(), &'static str>")]
+#[derive(Serialize)]
 pub struct ConnectSuccess<T: Serialize> {
     pub data: T,
 }
