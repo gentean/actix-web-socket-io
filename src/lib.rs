@@ -5,8 +5,11 @@ use actix_web::{
 use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
-use session::{encode_connect_success, encode_event, send_text, Emiter, Session, SessionStore};
-use socketio::{EventData, MessageType};
+use session::{
+    encode_binary_event, encode_connect_success, encode_event, send_binary, send_text,
+    BinaryEmiter, Emiter, Session, SessionStore,
+};
+use socketio::{buffer_to_value, replace_placeholders, EventData, MessageType};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -109,13 +112,20 @@ pub struct SocketServer {
     pub session_store: Arc<RwLock<SessionStore>>,
 }
 
+struct PendingBinary {
+    remaining: usize,
+    payload: Value,
+    buffers: Vec<Bytes>,
+}
+
 ///
 /// 数据接收对象
 ///
 pub struct SessionReceive {
     session_id: Uuid,
-    // 服务端监听的事件总线
-    listeners: RwLock<Vec<Listener>>,
+    // 服务端监听的事件总线：事件名 -> 处理方法集
+    listeners: RwLock<HashMap<String, Vec<Box<dyn MessageHandle>>>>,
+    pending_binary: RwLock<Option<PendingBinary>>,
     socket_server: Arc<SocketServer>,
 }
 
@@ -123,7 +133,8 @@ impl SessionReceive {
     pub fn new(session_id: Uuid, socket_server: Arc<SocketServer>) -> Self {
         Self {
             session_id,
-            listeners: RwLock::new(vec![]),
+            listeners: RwLock::new(HashMap::new()),
+            pending_binary: RwLock::new(None),
             socket_server,
         }
     }
@@ -133,6 +144,11 @@ impl SessionReceive {
         match message_type {
             MessageType::Connect => self.accept_connect().await,
             MessageType::Event(message_data) => self.handler_trigger_on(message_data).await,
+            MessageType::BinaryEvent {
+                attachments,
+                payload,
+            } => self.begin_binary_event(attachments, payload).await,
+            MessageType::Binary(data_bin) => self.handle_receive_binary_msg(data_bin).await,
             MessageType::None => (),
         }
     }
@@ -156,25 +172,77 @@ impl SessionReceive {
     /// 触发事件
     async fn handler_trigger_on(&self, event: EventData) {
         let listeners = self.listeners.read().await;
-        for listener in listeners.iter() {
-            // 按事件名匹配
-            if listener.event_name.eq(&event.0) {
-                listener
-                    .handler
-                    .handler(event.1.clone(), self.session_id)
-                    .await;
+        if let Some(handlers) = listeners.get(&event.0) {
+            for handler in handlers {
+                handler.handler(event.1.clone(), self.session_id).await;
             }
         }
     }
 
-    /// 处理二进制数据
-    pub fn handle_receive_binary_msg(&mut self, _data_bin: Bytes) {
-        // 触发监听
+    async fn begin_binary_event(&self, attachments: usize, payload: Value) {
+        if attachments == 0 {
+            self.dispatch_binary_payload(payload).await;
+            return;
+        }
+
+        *self.pending_binary.write().await = Some(PendingBinary {
+            remaining: attachments,
+            payload,
+            buffers: Vec::with_capacity(attachments),
+        });
+    }
+
+    /// 处理二进制附件：拼到当前 BINARY_EVENT，收齐后触发对应事件
+    pub async fn handle_receive_binary_msg(&self, data_bin: Bytes) {
+        let completed = {
+            let mut pending = self.pending_binary.write().await;
+            let Some(current) = pending.as_mut() else {
+                drop(pending);
+                self.handler_trigger_on(EventData("binary".into(), buffer_to_value(&data_bin)))
+                    .await;
+                return;
+            };
+
+            current.buffers.push(data_bin);
+            current.remaining = current.remaining.saturating_sub(1);
+            if current.remaining == 0 {
+                pending.take()
+            } else {
+                None
+            }
+        };
+
+        if let Some(mut packet) = completed {
+            replace_placeholders(&mut packet.payload, &packet.buffers);
+            self.dispatch_binary_payload(packet.payload).await;
+        }
+    }
+
+    async fn dispatch_binary_payload(&self, payload: Value) {
+        let event = match payload {
+            Value::Array(mut items) if !items.is_empty() => {
+                let event_name = items.remove(0).as_str().unwrap_or("binary").to_string();
+                let data = match items.len() {
+                    0 => Value::Null,
+                    1 => items.remove(0),
+                    _ => Value::Array(items),
+                };
+                EventData(event_name, data)
+            }
+            other => EventData("binary".into(), other),
+        };
+
+        self.handler_trigger_on(event).await;
     }
 
     /// 监听客户端推来的事件
     pub async fn on(&self, listener: Listener) {
-        self.listeners.write().await.push(listener);
+        self.listeners
+            .write()
+            .await
+            .entry(listener.event_name)
+            .or_default()
+            .push(listener.handler);
     }
 }
 
@@ -185,31 +253,71 @@ impl SocketServer {
         }
     }
 
-    /// 发送事件给客户端
+    async fn collect_sessions(&self, session_id: Option<Uuid>) -> Vec<actix_ws::Session> {
+        let store = self.session_store.read().await;
+        if let Some(session_id) = session_id {
+            store
+                .sessions
+                .get(&session_id)
+                .cloned()
+                .into_iter()
+                .collect()
+        } else {
+            store.sessions.values().cloned().collect()
+        }
+    }
+
+    /// 发送 JSON 事件给客户端
     pub async fn emit<D: Serialize + Send + 'static + Sync>(
         &self,
         emiter: Emiter<D>,
         session_id: Option<Uuid>,
     ) -> Result<(), String> {
         let text = encode_event(&emiter.event_name, &emiter.data).map_err(|err| err.to_string())?;
+        let sessions = self.collect_sessions(session_id).await;
+        let single = session_id.is_some();
 
-        if let Some(session_id) = session_id {
-            let mut session = {
-                let store = self.session_store.read().await;
-                store.sessions.get(&session_id).cloned()
-            };
-            if let Some(session) = session.as_mut() {
-                send_text(session, text)
-                    .await
-                    .map_err(|err| err.to_string())?;
+        for mut session in sessions {
+            let result = send_text(&mut session, text.clone()).await;
+            if single {
+                result.map_err(|err| err.to_string())?;
             }
-        } else {
-            let sessions: Vec<_> = {
-                let store = self.session_store.read().await;
-                store.sessions.values().cloned().collect()
-            };
-            for mut session in sessions {
-                let _ = send_text(&mut session, text.clone()).await;
+        }
+
+        Ok(())
+    }
+
+    /// 发送二进制事件给客户端
+    pub async fn emit_binary<D: Serialize + Send + Sync>(
+        &self,
+        emiter: BinaryEmiter<D>,
+        session_id: Option<Uuid>,
+    ) -> Result<(), String> {
+        if emiter.buffers.is_empty() {
+            return Err("buffers 不能为空".into());
+        }
+
+        let header = encode_binary_event(
+            &emiter.event_name,
+            emiter.data.as_ref(),
+            emiter.buffers.len(),
+        )
+        .map_err(|err| err.to_string())?;
+        let sessions = self.collect_sessions(session_id).await;
+        let single = session_id.is_some();
+
+        for mut session in sessions {
+            let result = async {
+                send_text(&mut session, header.clone()).await?;
+                for buffer in &emiter.buffers {
+                    send_binary(&mut session, buffer).await?;
+                }
+                Ok::<(), &'static str>(())
+            }
+            .await;
+
+            if single {
+                result.map_err(|err| err.to_string())?;
             }
         }
 
