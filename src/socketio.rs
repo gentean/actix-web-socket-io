@@ -1,3 +1,4 @@
+use actix_web::web::Bytes;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -68,6 +69,65 @@ pub enum MessageType {
     Connect,
     // 事件
     Event(EventData),
+    // 二进制事件头（后续跟 attachments 个二进制帧）
+    BinaryEvent { attachments: usize, payload: Value },
+    // 二进制附件 / 原始二进制
+    Binary(Bytes),
+}
+
+/// 解析 BINARY_EVENT 文本载荷：`<#>-[<namespace>,][<ack id>][json]`
+/// 例如 `1-["upload",{"_placeholder":true,"num":0}]`
+pub fn parse_binary_event_payload(data_str: &str) -> Option<(usize, Value)> {
+    let dash = data_str.find('-')?;
+    let attachments = data_str[..dash].parse().ok()?;
+    let mut rest = &data_str[dash + 1..];
+
+    if rest.starts_with('/') {
+        let comma = rest.find(',')?;
+        rest = &rest[comma + 1..];
+    }
+
+    let json_start = rest.find('[')?;
+    if !rest[..json_start].chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+
+    serde_json::from_str(&rest[json_start..])
+        .ok()
+        .map(|payload| (attachments, payload))
+}
+
+pub fn buffer_to_value(data: &[u8]) -> Value {
+    serde_json::json!({
+        "type": "Buffer",
+        "data": data,
+    })
+}
+
+/// 把 `{"_placeholder":true,"num":n}` 还原成对应的二进制附件
+pub fn replace_placeholders(value: &mut Value, buffers: &[Bytes]) {
+    match value {
+        Value::Object(map) => {
+            let is_placeholder = map.get("_placeholder").and_then(Value::as_bool) == Some(true);
+            if is_placeholder {
+                if let Some(num) = map.get("num").and_then(Value::as_u64) {
+                    if let Some(buf) = buffers.get(num as usize) {
+                        *value = buffer_to_value(buf);
+                        return;
+                    }
+                }
+            }
+            for child in map.values_mut() {
+                replace_placeholders(child, buffers);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                replace_placeholders(item, buffers);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// 连接成功响应数据

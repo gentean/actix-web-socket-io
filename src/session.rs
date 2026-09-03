@@ -1,3 +1,4 @@
+use actix_web::web::Bytes;
 use actix_ws::{Message, MessageStream, Session as WsSession};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,10 @@ use tokio::sync::{
 use uuid::Uuid;
 
 use crate::{
-    socketio::{EngineIOPacketType, EventData, MessageType, OpenPacket, SocketIOPacketType},
+    socketio::{
+        parse_binary_event_payload, EngineIOPacketType, EventData, MessageType, OpenPacket,
+        SocketIOPacketType,
+    },
     SocketConfig,
 };
 
@@ -91,7 +95,9 @@ impl Session {
                     let _ = ws_session.clone().close(reason).await;
                     break;
                 }
-                Message::Binary(_) => {}
+                Message::Binary(bytes) => {
+                    self.handle_binary(bytes);
+                }
                 _ => {}
             }
         }
@@ -129,9 +135,14 @@ impl Session {
                         SocketIOPacketType::Disconnect => MessageType::None,
                         SocketIOPacketType::Event => serde_json::from_str::<EventData>(data_str)
                             .map_or(MessageType::None, MessageType::Event),
+                        SocketIOPacketType::BinaryEvent => parse_binary_event_payload(data_str)
+                            .map(|(attachments, payload)| MessageType::BinaryEvent {
+                                attachments,
+                                payload,
+                            })
+                            .unwrap_or(MessageType::None),
                         SocketIOPacketType::Ack
                         | SocketIOPacketType::ConnectError
-                        | SocketIOPacketType::BinaryEvent
                         | SocketIOPacketType::BinaryAck => MessageType::None,
                     };
 
@@ -145,6 +156,25 @@ impl Session {
             | EngineIOPacketType::Ping
             | EngineIOPacketType::Upgrade
             | EngineIOPacketType::Noop => {}
+        }
+    }
+
+    fn handle_binary(&self, bytes: Bytes) {
+        let message_type = match bytes
+            .first()
+            .copied()
+            .and_then(|b| EngineIOPacketType::try_from(b).ok())
+        {
+            Some(EngineIOPacketType::Pong) => {
+                self.heartbeat.store(true, Ordering::Relaxed);
+                return;
+            }
+            Some(EngineIOPacketType::Message) => MessageType::Binary(bytes.slice(1..)),
+            _ => MessageType::Binary(bytes),
+        };
+
+        if let Err(err) = self.sender.send(message_type) {
+            log::error!("socket-io 发送二进制数据失败{err:?}");
         }
     }
 
@@ -206,6 +236,17 @@ pub(crate) async fn send_text(session: &mut WsSession, text: String) -> Result<(
     session.text(text).await.map_err(|_| "session closed")
 }
 
+pub(crate) async fn send_binary(
+    session: &mut WsSession,
+    payload: impl AsRef<[u8]>,
+) -> Result<(), &'static str> {
+    let payload = payload.as_ref();
+    let mut frame = Vec::with_capacity(1 + payload.len());
+    frame.push(EngineIOPacketType::Message as u8);
+    frame.extend_from_slice(payload);
+    session.binary(frame).await.map_err(|_| "session closed")
+}
+
 pub(crate) fn encode_connect_success<T: Serialize>(data: &T) -> Result<String, &'static str> {
     let json_str = serde_json::to_string(data).map_err(|_| "json 序列化失败")?;
     Ok(format!(
@@ -226,6 +267,37 @@ pub(crate) fn encode_event<T: Serialize>(
         EngineIOPacketType::Message as u8,
         SocketIOPacketType::Event as u8,
         event_name,
+        json_str
+    ))
+}
+
+fn placeholder(num: usize) -> serde_json::Value {
+    serde_json::json!({
+        "_placeholder": true,
+        "num": num,
+    })
+}
+
+/// 编码 BINARY_EVENT 文本头：`45N-["event", <data?>, {placeholder...}]`
+pub(crate) fn encode_binary_event<T: Serialize>(
+    event_name: &str,
+    data: Option<&T>,
+    attachment_count: usize,
+) -> Result<String, &'static str> {
+    let mut args = Vec::with_capacity(attachment_count + 2);
+    args.push(serde_json::Value::String(event_name.to_string()));
+    if let Some(data) = data {
+        args.push(serde_json::to_value(data).map_err(|_| "json 序列化失败")?);
+    }
+    for i in 0..attachment_count {
+        args.push(placeholder(i));
+    }
+    let json_str = serde_json::to_string(&args).map_err(|_| "json 序列化失败")?;
+    Ok(format!(
+        "{}{}{}-{}",
+        EngineIOPacketType::Message as u8,
+        SocketIOPacketType::BinaryEvent as u8,
+        attachment_count,
         json_str
     ))
 }
@@ -256,6 +328,34 @@ pub struct AuthSuccess<T: Serialize> {
 pub struct Emiter<T: Serialize> {
     pub event_name: String,
     pub data: T,
+}
+
+/// 发送二进制给客户端
+pub struct BinaryEmiter<T: Serialize = serde_json::Value> {
+    pub event_name: String,
+    /// 跟在事件名后的 JSON 参数，没有则填 `None`
+    pub data: Option<T>,
+    pub buffers: Vec<Bytes>,
+}
+
+impl BinaryEmiter {
+    pub fn new(event_name: impl Into<String>, buffers: Vec<Bytes>) -> Self {
+        Self {
+            event_name: event_name.into(),
+            data: None,
+            buffers,
+        }
+    }
+}
+
+impl<T: Serialize> BinaryEmiter<T> {
+    pub fn with_data(event_name: impl Into<String>, data: T, buffers: Vec<Bytes>) -> Self {
+        Self {
+            event_name: event_name.into(),
+            data: Some(data),
+            buffers,
+        }
+    }
 }
 
 /// 存储所有客户端会话的 store
