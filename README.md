@@ -8,6 +8,7 @@ Supported:
 
 - JSON events (`on` / `emit`)
 - Binary events (`on` / `emit_binary`)
+- Rooms (`join` / `leave` / `to(room).emit`)
 - Connect / disconnect (`connect` / `disconnect`)
 - Engine.IO heartbeat
 
@@ -145,6 +146,29 @@ socket_server
 ```
 
 The client receives `socket.on("download", (meta, buffer) => { ... })`.
+
+### Rooms
+
+Rooms are server-side only. Existing `emit` / `on` / `MessageHandle` stay unchanged.
+
+```rust
+session_receive.join("lobby").await;
+session_receive.leave("lobby").await;
+
+socket_server
+    .to("lobby")
+    .except(session_id) // optional
+    .emit(Emiter {
+        event_name: "/chat/message".into(),
+        data: "hello",
+    })
+    .await?;
+
+// Union of rooms
+socket_server.to("lobby").to("vip").emit(emiter).await?;
+```
+
+The session leaves every room automatically on disconnect.
 
 ### Config
 

@@ -3,7 +3,7 @@ use actix_ws::{Message, MessageStream, Session as WsSession};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -184,7 +184,9 @@ impl Session {
             serde_json::Value::Null,
         )));
 
-        self.session_store.write().await.sessions.remove(&self.id);
+        let mut store = self.session_store.write().await;
+        store.leave_all(self.id);
+        store.sessions.remove(&self.id);
     }
 }
 
@@ -362,11 +364,73 @@ impl<T: Serialize> BinaryEmiter<T> {
 pub struct SessionStore {
     // 存储的客户端会话
     pub sessions: HashMap<Uuid, WsSession>,
+    sids: HashMap<Uuid, HashSet<String>>,
+    rooms: HashMap<String, HashSet<Uuid>>,
 }
 impl SessionStore {
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            sids: HashMap::new(),
+            rooms: HashMap::new(),
         }
+    }
+
+    pub fn join(&mut self, session_id: Uuid, room: String) {
+        self.sids
+            .entry(session_id)
+            .or_default()
+            .insert(room.clone());
+        self.rooms.entry(room).or_default().insert(session_id);
+    }
+
+    pub fn leave(&mut self, session_id: Uuid, room: &str) {
+        if let Some(joined) = self.sids.get_mut(&session_id) {
+            joined.remove(room);
+            if joined.is_empty() {
+                self.sids.remove(&session_id);
+            }
+        }
+        if let Some(members) = self.rooms.get_mut(room) {
+            members.remove(&session_id);
+            if members.is_empty() {
+                self.rooms.remove(room);
+            }
+        }
+    }
+
+    pub fn leave_all(&mut self, session_id: Uuid) {
+        if let Some(joined) = self.sids.remove(&session_id) {
+            for room in joined {
+                if let Some(members) = self.rooms.get_mut(&room) {
+                    members.remove(&session_id);
+                    if members.is_empty() {
+                        self.rooms.remove(&room);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn rooms_of(&self, session_id: Uuid) -> Vec<String> {
+        self.sids
+            .get(&session_id)
+            .map(|rooms| rooms.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn collect_in_rooms(&self, rooms: &[String], except: Option<Uuid>) -> Vec<WsSession> {
+        let mut ids = HashSet::new();
+        for room in rooms {
+            if let Some(members) = self.rooms.get(room) {
+                ids.extend(members.iter().copied());
+            }
+        }
+        if let Some(except) = except {
+            ids.remove(&except);
+        }
+        ids.iter()
+            .filter_map(|id| self.sessions.get(id).cloned())
+            .collect()
     }
 }

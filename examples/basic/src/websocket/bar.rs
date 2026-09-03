@@ -38,6 +38,8 @@ async fn listen_system(req: HttpRequest, stream: Payload) -> impl Responder {
         })
         .await;
 
+    session_receive.join("system").await;
+
     // 主动推送 任务一
     actix_web::rt::spawn(async move {
         let socket_server = socket::get_server();
@@ -48,13 +50,11 @@ async fn listen_system(req: HttpRequest, stream: Payload) -> impl Responder {
 
             // 刷出系统时间
             if let Err(msg) = socket_server
-                .emit(
-                    Emiter {
-                        event_name: "/system/timestamp".into(),
-                        data: Utc::now().timestamp_millis(),
-                    },
-                    Some(session_id),
-                )
+                .to("system")
+                .emit(Emiter {
+                    event_name: "/system/timestamp".into(),
+                    data: Utc::now().timestamp_millis(),
+                })
                 .await
             {
                 log::error!("系统的时间刷出失败, msg: {}", msg);
