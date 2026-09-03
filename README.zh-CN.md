@@ -8,6 +8,7 @@
 
 - JSON 事件的接收与推送（`on` / `emit`）
 - 二进制事件的接收与推送（`on` / `emit_binary`）
+- 房间（`join` / `leave` / `to(room).emit`）
 - 连接 / 断开（`connect` / `disconnect`）
 - Engine.IO 心跳
 
@@ -150,6 +151,29 @@ socket_server
 ```
 
 客户端会收到 `socket.on("download", (meta, buffer) => { ... })`。
+
+### 房间
+
+房间只存在于服务端。原有 `emit` / `on` / `MessageHandle` 不用改。
+
+```rust
+session_receive.join("lobby").await;
+session_receive.leave("lobby").await;
+
+socket_server
+    .to("lobby")
+    .except(session_id) // 可选，排除某个会话
+    .emit(Emiter {
+        event_name: "/chat/message".into(),
+        data: "hello",
+    })
+    .await?;
+
+// 多个 to 是并集
+socket_server.to("lobby").to("vip").emit(emiter).await?;
+```
+
+断开连接时会自动退出已加入的房间。
 
 ### 配置
 

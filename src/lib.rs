@@ -244,6 +244,16 @@ impl SessionReceive {
             .or_default()
             .push(listener.handler);
     }
+
+    /// 当前会话加入房间
+    pub async fn join(&self, room: impl Into<String>) {
+        self.socket_server.join(self.session_id, room).await;
+    }
+
+    /// 当前会话离开房间
+    pub async fn leave(&self, room: impl AsRef<str>) {
+        self.socket_server.leave(self.session_id, room).await;
+    }
 }
 
 impl SocketServer {
@@ -321,6 +331,93 @@ impl SocketServer {
             }
         }
 
+        Ok(())
+    }
+
+    /// 会话加入房间
+    pub async fn join(&self, session_id: Uuid, room: impl Into<String>) {
+        self.session_store
+            .write()
+            .await
+            .join(session_id, room.into());
+    }
+
+    /// 会话离开房间
+    pub async fn leave(&self, session_id: Uuid, room: impl AsRef<str>) {
+        self.session_store
+            .write()
+            .await
+            .leave(session_id, room.as_ref());
+    }
+
+    /// 查询会话已加入的房间
+    pub async fn rooms(&self, session_id: Uuid) -> Vec<String> {
+        self.session_store.read().await.rooms_of(session_id)
+    }
+
+    /// 向房间广播。多个 `to` 是并集；`except` 排除某个会话。
+    pub fn to(&self, room: impl Into<String>) -> RoomEmit<'_> {
+        RoomEmit {
+            server: self,
+            rooms: vec![room.into()],
+            except: None,
+        }
+    }
+}
+
+/// 房间广播（不改变原有 `emit` / `emit_binary` 签名）
+pub struct RoomEmit<'a> {
+    server: &'a SocketServer,
+    rooms: Vec<String>,
+    except: Option<Uuid>,
+}
+
+impl<'a> RoomEmit<'a> {
+    pub fn to(mut self, room: impl Into<String>) -> Self {
+        self.rooms.push(room.into());
+        self
+    }
+
+    pub fn except(mut self, session_id: Uuid) -> Self {
+        self.except = Some(session_id);
+        self
+    }
+
+    pub async fn emit<D: Serialize + Send + Sync>(self, emiter: Emiter<D>) -> Result<(), String> {
+        let text = encode_event(&emiter.event_name, &emiter.data).map_err(|err| err.to_string())?;
+        let sessions = {
+            let store = self.server.session_store.read().await;
+            store.collect_in_rooms(&self.rooms, self.except)
+        };
+        for mut session in sessions {
+            let _ = send_text(&mut session, text.clone()).await;
+        }
+        Ok(())
+    }
+
+    pub async fn emit_binary<D: Serialize + Send + Sync>(
+        self,
+        emiter: BinaryEmiter<D>,
+    ) -> Result<(), String> {
+        if emiter.buffers.is_empty() {
+            return Err("buffers 不能为空".into());
+        }
+        let header = encode_binary_event(
+            &emiter.event_name,
+            emiter.data.as_ref(),
+            emiter.buffers.len(),
+        )
+        .map_err(|err| err.to_string())?;
+        let sessions = {
+            let store = self.server.session_store.read().await;
+            store.collect_in_rooms(&self.rooms, self.except)
+        };
+        for mut session in sessions {
+            let _ = send_text(&mut session, header.clone()).await;
+            for buffer in &emiter.buffers {
+                let _ = send_binary(&mut session, buffer).await;
+            }
+        }
         Ok(())
     }
 }
