@@ -1,8 +1,8 @@
 use actix_web::{App, HttpServer};
 
-mod websocket;
 mod infra;
 mod service;
+mod websocket;
 
 #[actix_web::main]
 pub async fn main() -> std::io::Result<()> {

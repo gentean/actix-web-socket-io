@@ -3,8 +3,8 @@ use actix_web::{
     web, App, Error,
 };
 
-mod foo;
 mod bar;
+mod foo;
 
 pub fn register<T>(app: App<T>) -> App<T>
 where

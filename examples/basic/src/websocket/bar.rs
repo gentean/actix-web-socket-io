@@ -84,7 +84,6 @@ async fn listen_system(req: HttpRequest, stream: Payload) -> impl Responder {
     http_response
 }
 
-
 pub struct SocketConnected;
 #[async_trait]
 impl MessageHandle for SocketConnected {

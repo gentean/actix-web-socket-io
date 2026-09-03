@@ -2,12 +2,11 @@ use actix_web::{
     web::{Bytes, Payload},
     HttpRequest, HttpResponse,
 };
-use actix_web_actors::ws::{self};
 use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
-use session::{Emiter, Session, SessionStore};
-use socketio::{ConnectSuccess, EventData, MessageType};
+use session::{encode_connect_success, encode_event, send_text, Emiter, Session, SessionStore};
+use socketio::{EventData, MessageType};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -78,10 +77,19 @@ impl SocketIO {
             }
         });
 
+        let session_id = session.id;
+        let http_response = match actix_ws::handle(req, stream) {
+            Ok((response, ws_session, msg_stream)) => {
+                session.start(ws_session, msg_stream);
+                Ok(response)
+            }
+            Err(err) => Err(err),
+        };
+
         SocketIOResult {
-            session_id: session.id,
-            http_response: ws::start(session, req, stream),
-            session_receive: session_receive.clone(),
+            session_id,
+            http_response,
+            session_receive,
         }
     }
 }
@@ -131,12 +139,14 @@ impl SessionReceive {
 
     /// 同意建立连接
     async fn accept_connect(&self) {
-        let session_store = self.socket_server.session_store.write().await;
-        let addr = session_store.sessions.get(&self.session_id);
-        if let Some(addr) = addr {
-            addr.do_send(ConnectSuccess {
-                data: HashMap::from([("sid", "accept")]),
-            });
+        let mut session = {
+            let session_store = self.socket_server.session_store.read().await;
+            session_store.sessions.get(&self.session_id).cloned()
+        };
+        if let Some(session) = session.as_mut() {
+            if let Ok(text) = encode_connect_success(&HashMap::from([("sid", "accept")])) {
+                let _ = send_text(session, text).await;
+            }
         }
 
         self.handler_trigger_on(EventData("connect".into(), Value::Null))
@@ -181,14 +191,25 @@ impl SocketServer {
         emiter: Emiter<D>,
         session_id: Option<Uuid>,
     ) -> Result<(), String> {
-        let emiter = Arc::new(emiter);
+        let text = encode_event(&emiter.event_name, &emiter.data).map_err(|err| err.to_string())?;
+
         if let Some(session_id) = session_id {
-            if let Some(session) = self.session_store.read().await.sessions.get(&session_id) {
-                session.do_send(emiter.clone());
+            let mut session = {
+                let store = self.session_store.read().await;
+                store.sessions.get(&session_id).cloned()
+            };
+            if let Some(session) = session.as_mut() {
+                send_text(session, text)
+                    .await
+                    .map_err(|err| err.to_string())?;
             }
         } else {
-            for session in self.session_store.read().await.sessions.values() {
-                session.do_send(emiter.clone());
+            let sessions: Vec<_> = {
+                let store = self.session_store.read().await;
+                store.sessions.values().cloned().collect()
+            };
+            for mut session in sessions {
+                let _ = send_text(&mut session, text.clone()).await;
             }
         }
 
